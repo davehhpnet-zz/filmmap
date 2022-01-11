@@ -1,26 +1,26 @@
 #!/usr/bin/env perl
 # findfilms.pl - quick video file management
 
-## Includes
+package Video;
 
 use File::Find;
-use Data::Dumper;    ## DEBUG
+use Data::Dumper;
 
-#my @dirs   = qw( /media2/movies /media3/movies /media4/movies /media/tv );
-my @dirs = qw( /media/tv );    ## DEBUG
-## User defineable.  This respects the idea of simply moving data found to a central
-##    location for the user to sort through manually.
+my @dirs = qw( /HGST1/tv /media1/tv /media2/tv );    ## DEBUG
+
 my $trashbin = '/media/trashvbin/';
 
 my $videos = {};
 
-my $extension_regex = qr/\.mkv$|\.mp4$|\.avi$|\.ts$/;
+my $extension_regex = qr/.(mkv|m4v|mp4|flv|avi|ts|webm|mpg|txt|nfo|sub|idx)$/;
 my (
     $show_list,       $verbose,       $sort_by_size,
     $find_duplicates, $trash_collect, $samples,
-    $move,            $remove,        $help
+    $move,            $remove,        $help,
+    $commit
 );
 
+$commit          = 1 if ( grep /--commit|-c/,                           @ARGV );
 $verbose         = 1 if ( grep /--verbose|-v/,                          @ARGV );
 $show_list       = 1 if ( grep /--list|-l/,                             @ARGV );
 $sort_by_size    = 1 if ( grep /--sort_by_size|--size_sort|--size/,     @ARGV );
@@ -29,11 +29,7 @@ $trash_collect   = 1 if ( grep /--trash_collect|--trash|-t/,            @ARGV );
 $find_samples    = 1 if ( grep /--find_samples|--samples|-s$/,          @ARGV );
 $remove          = 1 if ( grep /--remove|--rm|--del|--delete|--commit/, @ARGV );
 $move            = 1 if ( grep /--move|--relocate/,                     @ARGV );
-$help = 1 if ( grep /--help|-h/, @ARGV or !defined @ARGV );
-
-print Dumper \@ARGV;
-print "\$help -> $help\n";
-print "\$find_samples -> $find_samples\n";
+$help = 1 if ( grep /--help|-h/, @ARGV || defined !@ARGV );
 
 _print_eom() if defined $help;
 
@@ -97,16 +93,18 @@ if ($sort_by_size) {
 }
 
 if ($find_duplicates) {
-    print "\n";
-    print 'Number of Duplicates: ' . scalar @{ $videos->{'duplicates'} } . "\n";
-    printf "Gigs of Duplicates: %.2f\n",
-      $videos->{'total_duplicate_size'} / ( 1024 * 1024 * 1024 )
-      if $verbose;
-    print "\n";
+    _print_duplicate_size();
 }
 
 if ($trash_collect) {
-    print Dumper $videos->{'trash_list'};
+    foreach $video ( @{ $videos->{'trash_list'} } ) {
+        if ( $remove ) {
+            print "[DELETING TRASH FILE]: $video->{path}\n";
+            unlink( $video->{path} );
+        } else {
+            print "[TRASH IDENTIFIED]: $video->{path}\n";
+        }
+    }
 }
 
 if ($show_list) {
@@ -115,22 +113,33 @@ if ($show_list) {
     }
 }
 
-if ($find_samples) {
-    my $total_size = 0;
-    print "\n"
-      . 'Total Sample Files: '
-      . scalar @{ $videos->{'sample_list'} } . "\n";
-    foreach my $sample ( @{ $videos->{'sample_list'} } ) {
-        $total_size += $sample->{'size'};
-    }
-    print 'Total Sample Size: ' . _in_gigs($total_size) . " GB\n\n";
+if ($find_samples && !$remove ) {
+    _parse_file_size();
 }
 
-if ($find_duplicates) {
+if ( $remove ) {
+    print "\n\t\tDUPLICATES FLAGGED FOR REMOVAL!!!\n\n";
+    if ( $find_samples ) {
+        if ( $verbose ) {
+            foreach $sample ( @{ $videos->{'sample_list'} } ) {
+                print $sample->{'path'} ."\n";
+            }
+        }
+        if ( $commit ) {
+            foreach my $sample ( @{ $videos->{'sample_list'} } ) {
+                print "----> \unlink( $sample->{'path'})\n";
+                unlink( $sample->{'path'});
+            }
+        }
+    }
+    _parse_file_size();
+}
+
+if ($find_duplicates && !$remove ) {
     foreach my $video ( @{ $videos->{'duplicates'} } ) {
-        $video->{'size_gb'} = in_gigs( $video->{'size'} );
+        $video->{'size_gb'} = _in_gigs( $video->{'size'} );
         if ($verbose) {
-            print Dumper $video;
+            print Dumper $video->{'path'};
         }
         else {
             $video->{'size_gb'} = in_gigs( $video->{'size'} );
@@ -142,11 +151,16 @@ if ($find_duplicates) {
 sub is_duplicate {
     my ($video) = @_;
 
-    my $regex = qr/\.\d($extension_regex)/;
-    if ( $video->{'name'} =~ $regex ) {
+    my $regex = qr/\d\.\d($extension_regex)/;
+    if ( $video->{'name'} =~ $regex && $video->{'name'} !~ /5\.1/ ) {
         push( @{ $videos->{'duplicates'} }, $video );
         $videos->{'total_duplicate_size'} += $video->{'size'};
     }
+}
+
+if ( $find_duplicates && $remove ) {
+    my @d = map{ print "Removing $_->{'path'}\n" } @{ $videos->{'duplicates'} } if $verbose;
+    my @d = map{ unlink $_->{'path'} } @{ $videos->{'duplicates'} } if $commit ;
 }
 
 sub _cli_rinse {
@@ -164,6 +178,26 @@ sub _in_gigs {
     my $gigs;
     $gigs = sprintf "%.2f", $bytes / ( 1024 * 1024 * 1024 );
     return $gigs;
+}
+
+sub _print_duplicate_size{
+    print "\n";
+    print 'Number of Duplicates: ' . scalar @{ $videos->{'duplicates'} } . "\n";
+    printf "Gigs of Duplicates: %.2f\n",
+    $videos->{'total_duplicate_size'} / ( 1024 * 1024 * 1024 )
+    if $verbose;
+    print "\n";
+}
+
+sub _parse_file_size {
+    my $total_size = 0;
+    print "\n"
+    . 'Total Sample Files: '
+    . scalar @{ $videos->{'sample_list'} } . "\n";
+    foreach my $sample ( @{ $videos->{'sample_list'} } ) {
+        $total_size += $sample->{'size'};
+    }
+    print 'Total Sample Size: ' . _in_gigs($total_size) . " GB\n\n";
 }
 
 sub _print_eom {
@@ -193,11 +227,6 @@ sub _sort_by_size {
     }
     return @sorted;
 }
-
-package Video;
-use strict;
-use warnings;
-use Data::Dumper;
 
 sub new {
     my ( $class, $args ) = @_;
